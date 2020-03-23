@@ -35,7 +35,7 @@ func main() {
 		log.Fatal("Usage: ", os.Args[0], " <enrollment>", " <new san>")
 	}
 
-        config, err := edgegrid.Init("~/.edgerc", "papi")
+        config, err := edgegrid.Init("~/.edgerc", "default")
         if err != nil {
 		log.Fatal(err)
         }
