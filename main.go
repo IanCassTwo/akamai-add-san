@@ -19,13 +19,13 @@ package main
 import (
 	"os"
 	"fmt"
-	"bytes"
+	"time"
 	"log"
-	"net/http"
 	"encoding/json"
         "github.com/akamai/AkamaiOPEN-edgegrid-golang/edgegrid"
-        "github.com/akamai/AkamaiOPEN-edgegrid-golang/client-v1"
         "github.com/akamai/AkamaiOPEN-edgegrid-golang/cps-v2"
+//        "github.com/akamai/AkamaiOPEN-edgegrid-golang/client-v1"
+//        "github.com/akamai/AkamaiOPEN-edgegrid-golang/configdns-v2"
 
 ) 
 
@@ -35,74 +35,126 @@ func main() {
 		log.Fatal("Usage: ", os.Args[0], " <enrollment>", " <new san>")
 	}
 
-        config, err := edgegrid.Init("~/.edgerc", "default")
+        config, err := edgegrid.Init("~/.edgerc", "papi")
         if err != nil {
 		log.Fatal(err)
         }
 
 	cps.Init(config)
 
-	enrollment, _ := cps.GetEnrollment(fmt.Sprintf("/cps/v2/enrollments/%s", os.Args[1]))
+	//
+	// STEP 1
+	// Get Cert Enrollment
+	//
+
+	var enrollment cps.Enrollment
+	enrollment.Location = cps.GetLocation(os.Args[1])
+	err = enrollment.GetEnrollment()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Step 2
+	// Update enrollment with new SAN
+	//
 
 	*enrollment.CertificateSigningRequest.AlternativeNames = append(*enrollment.CertificateSigningRequest.AlternativeNames, os.Args[2])
 
 	s,_ := json.MarshalIndent(enrollment, "", "\t")
 	fmt.Println(string(s))
 
-	enrollmentresponse, _ := Update(config, enrollment)
+	updateresponse, err := enrollment.Update()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	s,_ = json.MarshalIndent(enrollmentresponse, "", "\t")
+	s,_ = json.MarshalIndent(updateresponse, "", "\t")
 	fmt.Println(string(s))
 
+
+	//
+	// Step 3
+	// Wait for validation to happen & for DV challenges to become available
+	//
+
+        currentstatus, err := enrollment.GetStatus(*updateresponse)
+        if err != nil {
+		log.Fatal(err)
+        }
+
+        s,_ = json.MarshalIndent(currentstatus, "", "\t")
+        fmt.Println(string(s))
+
+        for currentstatus.StatusInfo.Status != "coodinate-domain-validation" {
+                time.Sleep(10 * time.Second)
+
+                var err error
+
+                currentstatus, err = enrollment.GetStatus(*updateresponse)
+                if err != nil {
+			log.Fatal(err)
+                }
+                s,_ := json.MarshalIndent(currentstatus, "", "\t")
+                fmt.Println(string(s))
+        }
+
+	// Note, next 2 steps are commented out because we're assuming the site is currently live (on http) and
+	// redirecting path /.well-known/acme-challenge/* to dcv.akamai.com to complete the HTTP based validation
+
+	//
+	// Step 4
+	// Retrieve challenges
+	//
+
+	/*
+	domainvalidations, err := enrollment.GetDVChallenges(*currentstatus)
+        if err != nil {
+		log.Fatal(err)
+        }
+	*/
+
+	//
+	// Step 5
+	// Update DNS with each challenge
+	//
+
+	/*
+	for _, element := range domainvalidations.Dv {
+		if (element.ValidationStatus != "VALIDATED") {
+			for _, challenge := range element.Challenges {
+				if (challenge.Type == "dns-01") {
+
+					// Update DNS
+					var recordset dnsv2.Recordset
+					recordset.Name = challenge.FullPath
+					recordset.Type = "CNAME"
+					recordset.TTL = 30
+					recordset.Rdata = append(recordset.Rdata, challenge.Token)
+
+
+					req, _ := client.NewRequest(
+						config, 
+						"POST", 
+						fmt.Sprintf("/config-dns/v2/zones/{zone}/names/{name}/types/{type}", zone, element.domain, "CNAME"
+						// Incomplete
+					
+				}
+			}
+		}
+	}
+	*/
+
+	//
+	// STEP 6
+	// Tell CPS to validate
+	// Note, if we don't do this, validation will happen anyway. This just makes it a little quicker
+	//
+	err = enrollment.AcknowledgeDVChallenges(*currentstatus)
+        if err != nil {
+		log.Fatal(err)
+        }
+
+	fmt.Println("Finished")
 	
 }
 
-func Update(config edgegrid.Config, enrollment *cps.Enrollment) (*cps.CreateEnrollmentResponse, error) {
-
-	req, err := newRequest(
-		config,
-		"PUT",
-		*enrollment.Location,
-		enrollment,
-	)
-
-	if err != nil {
-		return nil, err
-	}
-
-	res, err := client.Do(config, req)
-
-	if err != nil {
-		return nil, err
-	}
-
-	if client.IsError(res) {
-		return nil, client.NewAPIError(res)
-	}
-
-	var response cps.CreateEnrollmentResponse
-	if err = client.BodyJSON(res, &response); err != nil {
-		return nil, err
-	}
-
-	return &response, nil
-}
-
-func newRequest(config edgegrid.Config, method, urlStr string, body interface{}) (*http.Request, error) {
-	buf := new(bytes.Buffer)
-	err := json.NewEncoder(buf).Encode(body)
-	if err != nil {
-		return nil, err
-	}
-
-	log.Printf("[DEBUG] newRequest, buf: %s", string(buf.Bytes()))
-
-	req, err := client.NewRequest(config, method, urlStr, buf)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Add("Content-Type", "application/vnd.akamai.cps.enrollment.v7+json")
-	req.Header.Add("Accept", "application/vnd.akamai.cps.enrollment-status.v1+json")
-
-	return req, nil
-}
